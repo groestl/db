@@ -1,0 +1,49 @@
+.TH db 1  "April, 2015" "version 0.1" "USER COMMANDS"
+.SH NAME
+db \- very unaspiring, single bash script .deb package builder
+.SH SYNOPSIS
+.B db
+[<options>] <target>
+.SH DESCRIPTION
+Build a quick and dirty debian package from <target>.
+
+To get going quickly, the script tries to guess project name, package version
+and a few other variables. Command line arguments may override these default 
+values if necessary.
+.SH OPTIONS
+.TP
+\-h
+display a short help text
+.TP
+\-n
+set project name
+.TP
+\-V
+set the project version
+.TP
+\-o
+override output path for the .deb package
+.TP
+\-d
+short description of the project
+.TP
+\-D
+longer description of the project
+.TP
+\-A
+set the author's name (e.g. "John Doe")
+\-a
+set the author's email
+.SH EXAMPLES
+.TP
+Create a debian package from the files at /path/to/project
+.B db
+/path/to/project
+.PP
+.SH EXIT STATUS
+db returns a zero exist status if it succeeds in creating a package.
+Non zero is returned in case of failure.
+.SH AUTHOR
+groestl (at) code.fm
+.SH SEE ALSO
+dpkg(1)

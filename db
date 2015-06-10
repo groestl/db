@@ -1,0 +1,354 @@
+#!/bin/bash -e
+
+#------------------------------------------------------------------------------------
+# The MIT License (MIT)
+#
+# Copyright (c) 2015 groestl
+#
+# Permission is hereby granted, free of charge, to any person obtaining a copy
+# of this software and associated documentation files (the "Software"), to deal
+# in the Software without restriction, including without limitation the rights
+# to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+# copies of the Software, and to permit persons to whom the Software is
+# furnished to do so, subject to the following conditions:
+#
+# The above copyright notice and this permission notice shall be included in all
+# copies or substantial portions of the Software.
+#
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+# IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+# FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+# AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+# LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+# OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+# SOFTWARE.
+#------------------------------------------------------------------------------------
+
+set -o pipefail  # trace ERR through pipes
+set -o errtrace  # trace ERR through 'time command' and other functions
+set -o nounset   ## set -u : exit the script if you try to use an uninitialised variable
+set -o errexit   ## set -e : exit the script if any statement returns a non-true return value
+
+
+progname="$0" # for error_exit
+
+function error_exit
+{
+    echo "${progname}: ${1:-"unknown error"}" 1>&2
+    exit 1
+}
+
+function show_help() {
+cat << EOF
+Usage: ${0##*/} [OPTIONS] PATH
+Build a quick and dirty debian package from PATH.
+
+To get going quickly, the script tries to guess project name, package version
+and a few other variables. You can provide command line arguments to override
+the following default values if necessary:
+
+    -n PROJECT      set project name to PROJECT
+    -V VERSION      set project version to VERSION
+    -o FILENAME     use FILENAME as output path for the .deb package 
+    -d SHORTDESC    short description of the project
+    -D LONGDESC     longer description of the project
+    -A AUTHOR       set the author's name (e.g. "John Doe")
+    -a AUTHOREMAIL  set the author's email
+    
+    -h              display this help and exit
+EOF
+}
+
+project_name=""
+project_version=""
+package_filename=""
+project_short_description=""
+project_long_description=""
+author_name="Unknown Author"
+author_email="unknown.author@example.org"
+  
+function parse_args() {
+	OPTIND=1 # Reset is necessary if getopts was used previously in the script.  It is a good idea to make this local in a function.
+  while getopts "hn:V:o:d:D:A:a:" opt; do
+  case "$opt" in
+  h)
+    show_help
+    exit 0
+    ;;
+  n)
+    project_name="$OPTARG"
+    ;;
+  V)
+    project_version="$OPTARG"
+    ;;
+  o)
+    package_filename="$OPTARG"
+    ;;
+  d)
+    project_short_description="$OPTARG"
+    ;;
+  D)
+    project_long_description="$OPTARG"
+    ;;
+  A)
+    author_name="$OPTARG"
+    ;;
+  a)
+    author_email="$OPTARG"
+    ;;
+  '?')
+    show_help >&2
+    exit 1
+    ;;
+  esac
+  done
+  shift "$((OPTIND-1))" # Shift off the options and optional --.
+  if [ "$#" -lt "1" ]; then
+    show_help >&2
+    exit 1
+  fi
+  target_path="$1"
+}
+
+  
+#----------------------------------------------------------------------------
+# detects the enclosing git project root given a pathname (if there is one)
+#----------------------------------------------------------------------------
+find_git_root_by_path() {
+  local target_path="$1"
+	if [ ! -d "$target_path" ]; then
+		target_path=$(dirname "$target_path")
+	fi
+  pushd "$target_path" > /dev/null
+  gitroot=$(git rev-parse --show-toplevel 2> /dev/null)
+  popd > /dev/null
+  echo "$gitroot"
+}
+
+#----------------------------------------------------------------------------
+# given a target path, returns the last git commit if available
+#----------------------------------------------------------------------------
+find_git_commit_hash() {
+  local target_path="$1"
+  local git_root=$(find_git_root_by_path "$target_path")
+	if [ ! -z "$git_root" ]; then
+		echo $(git -C "$git_root" rev-parse --short HEAD 2> /dev/null)
+	fi
+}
+
+#----------------------------------------------------------------------------
+# tries to resolve a "project_path" (which might be the parent directory for
+# a simple file, the directory itself, or the git root path if the 
+# target_path is within a git project
+#----------------------------------------------------------------------------
+find_project_path() {
+  local target_path="$1"
+	if [ -f "$target_path" ]; then
+	  target_path=$(dirname "$target_path")
+	elif [ -d "$target_path" ]; then
+	  target_path="$target_path"
+	else
+	  error_exit "$LINENO: target path \"$target_path\" is neither a file nor a directory"
+	fi
+
+	git_root=$(find_git_root_by_path "$target_path")
+	if [ -z "$git_root" ]; then
+		echo "$target_path"
+	else
+	  echo "$git_root"
+	fi
+}
+
+#----------------------------------------------------------------------------
+# given the project_path (which might be a parent directory of the
+# target_path) returns the last part of the path, or "project", if the
+# project directory is "/" (root)
+#----------------------------------------------------------------------------
+sanitized_project_name() {
+  local project_path="$1"
+  local project_name=$(basename $(realpath "$project_path"))
+  if [ "$project_name" != "/" ]; then
+    echo "$project_name"
+  fi
+}
+
+#----------------------------------------------------------------------------
+# given the target path, returns either a project name (filename of a single
+# executable) or an empty string
+#----------------------------------------------------------------------------
+find_project_name_for_single_executable() {
+  local target_path="$1"
+  local found_executable=""
+  while IFS= read -r -d '' im; do
+    if [ ! -z "$found_executable" ]; then
+			# second line, not only a single executable found
+			return
+    fi
+    found_executable="$im"
+	done < <(find $target_path -readable -type f -executable -print0 2>/dev/null)
+  if [ -z "$found_executable" ]; then
+    return
+  fi
+  echo $(basename $(realpath "$found_executable"))
+}
+
+#----------------------------------------------------------------------------
+# strategy of the "default project name", based on the target_path:
+#  - if the target contains a single executable, the project name is the
+#    filename of that executable
+#  - if the target is a single file, the project name is the filename
+#    of that file
+#  - if the target path is a directory, and is/is within a git project, the
+#    project name is the directory name of the git project root
+#  - if the target path is not "/" (root), the project name is the last part
+#    of the target path
+#  - fallback: the project name is "project"
+#----------------------------------------------------------------------------
+default_project_name() {
+  local target_path="$1"
+  local default_project_name
+  
+  default_project_name=$(find_project_name_for_single_executable "$target_path")
+  if [ ! -z "$default_project_name" ]; then
+    echo "$default_project_name"
+    return
+  fi
+  
+  default_project_name=$(sanitized_project_name $(find_project_path "$target_path"))
+  if [ ! -z "$default_project_name" ]; then
+    echo "$default_project_name"
+    return
+  fi
+ 
+  # fallback
+  echo "project"
+}
+
+#----------------------------------------------------------------------------
+# generates a default "rolling release" package version based on:
+# a major and minor version, date, time, and git commit hash
+# example: 1.0-150430-125549-3d204d3
+#----------------------------------------------------------------------------
+default_version() {
+  local target_path="$1"
+  local majorminor="1.0"
+  local timestamp=$(date +"%y%m%d-%H%M%S")
+  local commit_hash=$(find_git_commit_hash "$target_path")
+  local commit_hash_postfix="$commit_hash"
+  if [ ! -z "$commit_hash_postfix" ]; then
+    commit_hash_postfix="-$commit_hash_postfix"
+  fi
+  local default_version="$majorminor-$timestamp$commit_hash_postfix"
+  echo "$default_version"
+}
+
+#----------------------------------------------------------------------------
+# main part
+#----------------------------------------------------------------------------
+parse_args $*
+
+if [ ! -e "$target_path" ]; then
+  error_exit "$LINENO: target path \"$target_path\" is neither a file nor a directory"
+fi
+
+target_path_absolute="$(cd "$(dirname "$target_path")"; pwd)/$(basename "$target_path")"
+
+project_name=${project_name:-$(default_project_name "$target_path")}
+project_version=${project_version:-$(default_version "$target_path")}
+package_filename=${package_filename:-"$project_name-$project_version.deb"}
+project_short_description=${project_short_description:-"This is $project_name"}
+project_long_description=${project_long_description:-"Debian package for $project_name"}
+
+
+#----------------------------------------------------------------------------
+prepare_workspace() {
+	tmpdir="$(mktemp -d -t db-tmp-XXXXXXX)"
+	#rm -rf work
+	#tmpdir=work
+	mkdir -p "$tmpdir"
+	mkdir "$tmpdir/pkg" "$tmpdir/root" "$tmpdir/control"
+	echo "$tmpdir"
+}
+
+cleanup_workspace() {
+  local workspace="$1"
+  rm -rf "$workspace"
+}
+
+#----------------------------------------------------------------------------
+control_create_control_file() {
+	local control_file="$1"
+	#pushd "$tmpdir/control" > /dev/null
+	#cp control "$tmpdir/control.tmp"
+	cat <<-ENDOFMESSAGE > "$control_file"
+Package: $project_name
+Version: $project_version
+Section: misc
+Priority: extra
+Maintainer: $author_name <$author_email>
+Build-Depends: 
+Standards-Version: 3.9.5.0
+Architecture: all
+Depends: 
+Description:$project_short_description
+ $project_long_description
+ENDOFMESSAGE
+}
+
+#----------------------------------------------------------------------------
+data_create_copyright_file() {
+	local copyright_file="$1"
+	local copyright_dir=$(dirname "$copyright_file")
+	mkdir -p "$copyright_dir"
+	local year=$(date +"%Y")
+	cat <<-ENDOFMESSAGE > "$copyright_file"
+Copyright (c) $year <copyright holders>
+
+Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files (the "Software"), to deal in the Software without restriction, including without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software, and to permit persons to whom the Software is furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+ENDOFMESSAGE
+}
+
+#----------------------------------------------------------------------------
+data_create_changelog_file() {
+	local changelog_file="$1"
+	local changelog_dir=$(dirname "$changelog_file")
+	mkdir -p "$changelog_dir"
+	local datestr=$(date -R)
+	cat <<-ENDOFMESSAGE | gzip -9 -c > "$changelog_file"
+$project_name ($project_version) stable; urgency=low
+
+  * Release.
+
+ -- $author_name <$author_email>  $datestr
+ENDOFMESSAGE
+}
+
+build_package() {
+  local target_path="$1"
+	workspace=$(prepare_workspace)
+	control_create_control_file "$workspace/control/control"
+	data_create_copyright_file "$workspace/root/usr/share/doc/$project_name/copyright"
+	data_create_changelog_file "$workspace/root/usr/share/doc/$project_name/changelog.Debian.gz"
+	
+  cp -ar "$target_path/." "$workspace/root/"
+
+	tar -czf "$workspace/pkg/data.tar.gz" --owner=0 --group=0 -C "$workspace/root/" .
+	tar -czf "$workspace/pkg/control.tar.gz" -C "$workspace/control/" .
+	echo "2.0" > "$workspace/pkg/debian-binary"
+	
+	pushd "$workspace/pkg" > /dev/null
+  ar -cr tmp.deb debian-binary control.tar.gz data.tar.gz
+  popd > /dev/null
+  
+  cp "$workspace/pkg/tmp.deb" "$package_filename"
+  echo "$package_filename"
+  
+  cleanup_workspace "$workspace"
+}
+
+package_file=$(build_package "$target_path")
+echo "$package_file"
