@@ -1,4 +1,4 @@
-#!/bin/bash -e
+#!/bin/bash
 
 #------------------------------------------------------------------------------------
 # The MIT License (MIT)
@@ -325,6 +325,20 @@ $project_name ($project_version) stable; urgency=low
 ENDOFMESSAGE
 }
 
+#----------------------------------------------------------------------------
+# fixes permissions for directories, files, and executable flag in some
+# well known locations
+#----------------------------------------------------------------------------
+data_fix_permissions() {
+	local root_path="$1"
+	find "$root_path" -type d -exec chmod 755 {} +
+	find "$root_path" -type f -exec chmod 644 {} +
+	executable_paths=( "/usr/local/sbin" "/usr/local/bin" "/usr/sbin" "/usr/bin" "/sbin" "/bin" )
+	for executable_path in "${executable_paths[@]}"; do
+		if [ -d "$root_path$executable_path" ]; then find "$root_path$executable_path" -type f -exec chmod 755 {} +; fi
+	done
+}
+
 build_package() {
   local target_path="$1"
 	workspace=$(prepare_workspace)
@@ -333,7 +347,7 @@ build_package() {
 	data_create_changelog_file "$workspace/root/usr/share/doc/$project_name/changelog.Debian.gz"
 	
   cp -ar "$target_path/." "$workspace/root/"
-
+	data_fix_permissions "$workspace/root"
 	tar -czf "$workspace/pkg/data.tar.gz" --owner=0 --group=0 -C "$workspace/root/" .
 	tar -czf "$workspace/pkg/control.tar.gz" -C "$workspace/control/" .
 	echo "2.0" > "$workspace/pkg/debian-binary"
