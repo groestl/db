@@ -286,10 +286,8 @@ Version: $project_version
 Section: misc
 Priority: extra
 Maintainer: $author_name <$author_email>
-Build-Depends: 
 Standards-Version: 3.9.5.0
 Architecture: all
-Depends: 
 Description:$project_short_description
  $project_long_description
 ENDOFMESSAGE
