@@ -40,8 +40,8 @@ function error_exit
 
 function show_help() {
 cat << EOF
-Usage: ${0##*/} [OPTIONS] PATH
-Build a quick and dirty debian package from PATH.
+Usage: ${0##*/} [OPTIONS] TARGET
+Build a quick and dirty debian package from TARGET.
 
 To get going quickly, the script tries to guess project name, package version
 and a few other variables. You can provide command line arguments to override
@@ -54,6 +54,7 @@ the following default values if necessary:
     -D LONGDESC     longer description of the project
     -A AUTHOR       set the author's name (e.g. "John Doe")
     -a AUTHOREMAIL  set the author's email
+    -p PREFIX       prefix package TARGET paths with PREFIX
     
     -h              display this help and exit
 EOF
@@ -64,12 +65,13 @@ project_version=""
 package_filename=""
 project_short_description=""
 project_long_description=""
+package_data_prefix=""
 author_name="Unknown Author"
 author_email="unknown.author@example.org"
   
 function parse_args() {
 	OPTIND=1 # Reset is necessary if getopts was used previously in the script.  It is a good idea to make this local in a function.
-  while getopts "hn:V:o:d:D:A:a:" opt; do
+  while getopts "hn:V:o:d:D:A:a:p:" opt; do
   case "$opt" in
   h)
     show_help
@@ -95,6 +97,9 @@ function parse_args() {
     ;;
   a)
     author_email="$OPTARG"
+    ;;
+  p)
+    package_data_prefix="$OPTARG"
     ;;
   '?')
     show_help >&2
@@ -345,9 +350,10 @@ build_package() {
 	control_create_control_file "$workspace/control/control"
 	data_create_copyright_file "$workspace/root/usr/share/doc/$project_name/copyright"
 	data_create_changelog_file "$workspace/root/usr/share/doc/$project_name/changelog.Debian.gz"
-	
-  cp -ar "$target_path/." "$workspace/root/"
+	mkdir -p "$workspace/root$package_data_prefix/"
+	cp -ar "$target_path/." "$workspace/root$package_data_prefix/"
 	data_fix_permissions "$workspace/root"
+	
 	tar -czf "$workspace/pkg/data.tar.gz" --owner=0 --group=0 -C "$workspace/root/" .
 	tar -czf "$workspace/pkg/control.tar.gz" -C "$workspace/control/" .
 	echo "2.0" > "$workspace/pkg/debian-binary"
