@@ -239,6 +239,9 @@ default_version() {
   local majorminor="1.0"
   local timestamp=$(date +"%y%m%d-%H%M%S")
   local commit_hash=$(find_git_commit_hash "$target_path")
+  if [ -z "$commit_hash" ]; then
+    commit_hash=$(find_git_commit_hash .)
+  fi
   local commit_hash_postfix="$commit_hash"
   if [ ! -z "$commit_hash_postfix" ]; then
     commit_hash_postfix="-$commit_hash_postfix"
